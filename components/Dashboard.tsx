@@ -26,6 +26,10 @@ import {
   TrendingUp,
   Search,
   X,
+  Pencil,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { generateHRInsight } from "../services/geminiService";
 import { getAccessToken, getCurrentUserName } from "@/utils/auth";
@@ -76,10 +80,22 @@ interface Announcement {
   id: string;
   text: string;
   createdAt: string;
+  updatedAt?: string;
   user?: {
     fullName: string;
   };
 }
+
+interface AnnouncementMeta {
+  total: number;
+  limit: number;
+  offset: number;
+  page: number;
+  pageCount: number;
+  hasMore: boolean;
+}
+
+const ANNOUNCEMENTS_PAGE_SIZE = 5;
 
 const userName = getCurrentUserName();
 
@@ -94,12 +110,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
   const [loadingInsight, setLoadingInsight] = useState(false);
 
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [announcementMeta, setAnnouncementMeta] = useState<AnnouncementMeta>({
+    total: 0,
+    limit: ANNOUNCEMENTS_PAGE_SIZE,
+    offset: 0,
+    page: 1,
+    pageCount: 0,
+    hasMore: false,
+  });
+  const [announcementPage, setAnnouncementPage] = useState(1);
+  const [announcementsLoading, setAnnouncementsLoading] = useState(false);
+  const [announcementError, setAnnouncementError] = useState<string | null>(null);
+  const [announcementBusyId, setAnnouncementBusyId] = useState<string | null>(
+    null,
+  );
 
   const hasLoggedDashboardRef = useRef(false);
 
   const [newAnnouncement, setNewAnnouncement] = useState("");
-
   const [showAnnounceInput, setShowAnnounceInput] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
 
   // Award Points State
   const [isPointsModalOpen, setIsPointsModalOpen] = useState(false);
@@ -160,11 +191,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
           (a, b) => getPerformerMetric(b) - getPerformerMetric(a),
         );
 
-  const fetchAnnouncements = async () => {
+  const fetchAnnouncements = async (page = announcementPage) => {
     try {
+      setAnnouncementsLoading(true);
+      setAnnouncementError(null);
       const token = getAccessToken();
 
-      const res = await fetch(`${API_BASE}/announcements`, {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(ANNOUNCEMENTS_PAGE_SIZE),
+      });
+
+      const res = await fetch(`${API_BASE}/announcements?${params}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -173,12 +211,24 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
       if (!res.ok) throw new Error("Failed to fetch announcements");
 
       const result = await res.json();
+      const list = Array.isArray(result.data) ? result.data : [];
+      const meta = result.meta ?? {};
 
-      console.log("Announcements API:", result);
-
-      setAnnouncements(result.data);
+      setAnnouncements(list);
+      setAnnouncementPage(meta.page ?? page);
+      setAnnouncementMeta({
+        total: meta.total ?? list.length,
+        limit: meta.limit ?? ANNOUNCEMENTS_PAGE_SIZE,
+        offset: meta.offset ?? 0,
+        page: meta.page ?? page,
+        pageCount: meta.pageCount ?? 0,
+        hasMore: Boolean(meta.hasMore),
+      });
     } catch (err) {
       console.error("Announcements fetch error:", err);
+      setAnnouncementError("Failed to load announcements.");
+    } finally {
+      setAnnouncementsLoading(false);
     }
   };
 
@@ -225,6 +275,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
     if (!newAnnouncement.trim()) return;
 
     try {
+      setAnnouncementError(null);
       const token = getAccessToken();
 
       const res = await fetch(`${API_BASE}/announcements`, {
@@ -239,13 +290,105 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
       });
 
       const result = await res.json();
-
-      setAnnouncements((prev) => [result.data, ...prev]);
+      if (!res.ok || !result.success) {
+        throw new Error(result.error || "Failed to post announcement");
+      }
 
       setNewAnnouncement("");
       setShowAnnounceInput(false);
+      await fetchAnnouncements(1);
     } catch (err) {
       console.error(err);
+      setAnnouncementError(
+        err instanceof Error ? err.message : "Failed to post announcement",
+      );
+    }
+  };
+
+  const startEditAnnouncement = (announcement: Announcement) => {
+    setEditingId(announcement.id);
+    setEditingText(announcement.text);
+    setShowAnnounceInput(false);
+    setAnnouncementError(null);
+  };
+
+  const cancelEditAnnouncement = () => {
+    setEditingId(null);
+    setEditingText("");
+  };
+
+  const handleUpdateAnnouncement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingId || !editingText.trim()) return;
+
+    try {
+      setAnnouncementBusyId(editingId);
+      setAnnouncementError(null);
+      const token = getAccessToken();
+
+      const res = await fetch(`${API_BASE}/announcements/${editingId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ text: editingText }),
+      });
+
+      const result = await res.json();
+      if (!res.ok || !result.success) {
+        throw new Error(result.error || "Failed to update announcement");
+      }
+
+      setAnnouncements((prev) =>
+        prev.map((item) =>
+          item.id === editingId ? { ...item, ...result.data } : item,
+        ),
+      );
+      cancelEditAnnouncement();
+    } catch (err) {
+      console.error(err);
+      setAnnouncementError(
+        err instanceof Error ? err.message : "Failed to update announcement",
+      );
+    } finally {
+      setAnnouncementBusyId(null);
+    }
+  };
+
+  const handleDeleteAnnouncement = async (id: string) => {
+    if (!window.confirm("Delete this announcement?")) return;
+
+    try {
+      setAnnouncementBusyId(id);
+      setAnnouncementError(null);
+      const token = getAccessToken();
+
+      const res = await fetch(`${API_BASE}/announcements/${id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || result.success === false) {
+        throw new Error(result.error || "Failed to delete announcement");
+      }
+
+      const nextPage =
+        announcements.length === 1 && announcementPage > 1
+          ? announcementPage - 1
+          : announcementPage;
+      await fetchAnnouncements(nextPage);
+      if (editingId === id) cancelEditAnnouncement();
+    } catch (err) {
+      console.error(err);
+      setAnnouncementError(
+        err instanceof Error ? err.message : "Failed to delete announcement",
+      );
+    } finally {
+      setAnnouncementBusyId(null);
     }
   };
 
@@ -638,8 +781,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
                 <h3 className="font-bold text-slate-800">Announcements</h3>
               </div>
               <button
-                onClick={() => setShowAnnounceInput(!showAnnounceInput)}
+                onClick={() => {
+                  setShowAnnounceInput(!showAnnounceInput);
+                  if (!showAnnounceInput) cancelEditAnnouncement();
+                }}
                 className="p-1 hover:bg-slate-100 rounded-full text-slate-500"
+                aria-label={
+                  showAnnounceInput ? "Close new announcement" : "New announcement"
+                }
               >
                 {showAnnounceInput ? (
                   <X className="w-4 h-4" />
@@ -648,6 +797,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
                 )}
               </button>
             </div>
+
+            {announcementError && (
+              <p className="mb-3 text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2">
+                {announcementError}
+              </p>
+            )}
 
             {showAnnounceInput && (
               <form
@@ -671,19 +826,130 @@ export const Dashboard: React.FC<DashboardProps> = ({ users = [] }) => {
             )}
 
             <div className="space-y-3">
-              {announcements.map((announcement) => (
-                <div
-                  key={announcement.id}
-                  className="p-3 bg-slate-50 border border-slate-100 rounded-lg text-sm text-slate-700 leading-snug relative pl-4 border-l-4 border-l-brand-accent"
-                >
-                  {announcement.text}
-                  <span className="block text-[10px] text-slate-400 mt-1">
-                    {new Date(announcement.createdAt).toLocaleDateString()}
-                    {announcement.user && ` • ${announcement.user.fullName}`}
-                  </span>
-                </div>
-              ))}
+              {announcementsLoading && announcements.length === 0 ? (
+                <p className="text-sm text-slate-500 py-4 text-center">
+                  Loading announcements...
+                </p>
+              ) : announcements.length === 0 ? (
+                <p className="text-sm text-slate-500 py-4 text-center">
+                  No announcements yet.
+                </p>
+              ) : (
+                announcements.map((announcement) => (
+                  <div
+                    key={announcement.id}
+                    className="p-3 bg-slate-50 border border-slate-100 rounded-lg text-sm text-slate-700 leading-snug relative pl-4 border-l-4 border-l-brand-accent"
+                  >
+                    {editingId === announcement.id ? (
+                      <form onSubmit={handleUpdateAnnouncement} className="space-y-2">
+                        <textarea
+                          className="w-full border border-slate-200 rounded-lg p-2 text-sm focus:ring-2 focus:ring-brand-primary focus:outline-none resize-none"
+                          rows={3}
+                          value={editingText}
+                          onChange={(e) => setEditingText(e.target.value)}
+                          disabled={announcementBusyId === announcement.id}
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="submit"
+                            disabled={
+                              !editingText.trim() ||
+                              announcementBusyId === announcement.id
+                            }
+                            className="flex-1 bg-brand-primary text-white text-xs font-bold py-1.5 rounded-lg hover:opacity-90 disabled:opacity-50"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelEditAnnouncement}
+                            disabled={announcementBusyId === announcement.id}
+                            className="flex-1 border border-slate-200 text-slate-600 text-xs font-bold py-1.5 rounded-lg hover:bg-slate-100"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="flex-1">{announcement.text}</p>
+                          <div className="flex shrink-0 gap-1">
+                            <button
+                              type="button"
+                              onClick={() => startEditAnnouncement(announcement)}
+                              disabled={announcementBusyId === announcement.id}
+                              className="p-1 rounded text-slate-400 hover:text-brand-primary hover:bg-white"
+                              aria-label="Edit announcement"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleDeleteAnnouncement(announcement.id)
+                              }
+                              disabled={announcementBusyId === announcement.id}
+                              className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-white"
+                              aria-label="Delete announcement"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <span className="block text-[10px] text-slate-400 mt-1">
+                          {new Date(announcement.createdAt).toLocaleDateString()}
+                          {announcement.user &&
+                            ` • ${announcement.user.fullName}`}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
+
+            {announcementMeta.total > 0 && (
+              <div className="mt-4 flex items-center justify-between gap-2 text-xs text-slate-500">
+                <span>
+                  {announcementMeta.total === 0
+                    ? "0"
+                    : `${announcementMeta.offset + 1}–${Math.min(
+                        announcementMeta.offset + announcements.length,
+                        announcementMeta.total,
+                      )}`}{" "}
+                  of {announcementMeta.total}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => fetchAnnouncements(announcementPage - 1)}
+                    disabled={announcementPage <= 1 || announcementsLoading}
+                    className="inline-flex items-center gap-0.5 rounded border border-slate-300 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    Prev
+                  </button>
+                  <span className="px-1">
+                    {announcementPage} /{" "}
+                    {Math.max(1, announcementMeta.pageCount)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => fetchAnnouncements(announcementPage + 1)}
+                    disabled={
+                      announcementsLoading ||
+                      announcementPage >=
+                        Math.max(1, announcementMeta.pageCount)
+                    }
+                    className="inline-flex items-center gap-0.5 rounded border border-slate-300 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Next
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
